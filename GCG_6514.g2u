@@ -1,0 +1,271 @@
+﻿Program.Sub.Preflight.Start
+V.Global.sError.Declare(String)
+
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Author: Arturo Almaguer
+'Date: 18 October 2021
+'Customer: American Stainless Pumps, quote number 12939
+'This program sends notification emails through courier when HOT items are received in through PO Receipts
+'This script is launched off 15040 Post OK hook from PO Receipts Screen
+
+Function.Intrinsic.UI.UsePixels ' Allows you to use Pixels instead of Twips throughout
+
+F.Intrinsic.Control.Try
+
+	V.Local.sPO.Declare(String)
+	V.Local.sSQL.Declare(String)
+	V.Local.iMainCounter.Declare(Long)
+	V.Local.iCounter.Declare(Long)
+	
+	'Getting PO number from PO Receipts screen
+	F.Intrinsic.String.LPad(V.Passed.000002,"0",7,V.Local.sPO)
+	
+	'Getting BDF data
+	F.Intrinsic.Control.CallSub("CallBDF")
+	
+	'Getting all PO lines within the PO
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	F.Intrinsic.String.Build("select * from V_PO_LINES where PURCHASE_ORDER = '{0}';", V.Local.sPO, V.Local.sSQL)
+	F.Data.DataTable.CreateFromSQL("dtPO", "Con", V.Local.sSQL, True)
+	
+	'Looping through all PO lines to look if User field 5 has been marked as HOT
+	F.Intrinsic.Control.For(V.Local.iCounter, 0, V.DataTable.dtPOLine.RowCount--, 1) 
+	
+		F.Intrinsic.Control.For(V.Local.iMainCounter, 0, V.DataTable.dtPO.RowCount--, 1) 
+			
+			F.Intrinsic.Control.If(V.DataTable.dtPOLine(V.Local.iCounter).LINE!FieldValTrim, =, V.DataTable.dtPO(V.Local.iMainCounter).RECORD_NO!FieldValTrim)
+			
+				F.Intrinsic.Control.If(V.DataTable.dtPO(V.Local.iMainCounter).USER_5!FieldValTrim, =, "HOT", "OR", V.DataTable.dtPO(V.Local.iMainCounter).USER_5!FieldValTrim, =, "Hot")
+					
+					'Getting more data
+					F.Intrinsic.String.Build("select RTRIM(PURCHASE_ORDER) PURCHASE_ORDER, RTRIM(PO_LINE) PO_LINE, RTRIM(FLAG_RECV_CLOSED) FLAG_RECV_CLOSED, QTY_RECEIVED, QTY_RECD_NOT_INSP, RTRIM(FLAG_INSP) FLAG_INSP, JOB + SUFFIX as WO from V_PO_HISTORY where PURCHASE_ORDER = '{0}' and PO_LINE = '{1}' ;", V.DataTable.dtPO(V.Local.iMainCounter).PURCHASE_ORDER!FieldValTrim, V.DataTable.dtPO(V.Local.iMainCounter).RECORD_NO!FieldValTrim, V.Local.sSQL)
+					F.Data.DataTable.CreateFromSQL("dtFlags", "Con", V.Local.sSQL, True)
+					
+					'Writing record to courier table to send emails out
+					F.Intrinsic.Control.CallSub("SendEmail", "Part", V.DataTable.dtPO(V.Local.iMainCounter).PART!FieldValTrim, "MainCounter", V.Local.iMainCounter)
+					
+					'Closing dt
+					f.Data.DataTable.Close("dtFlags")
+					
+				F.Intrinsic.Control.EndIf
+			
+			F.Intrinsic.Control.EndIf
+			
+		F.Intrinsic.Control.Next(V.Local.iMainCounter)
+		
+	F.Intrinsic.Control.Next(V.Local.iCounter)
+	
+	F.ODBC.Connection!Con.Close
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.Main.End
+Program.Sub.SendEmail.Start
+'This subroutine will send an email as a notification
+'V.Args.Part = Part number, V.Args.MainCounter = counter from main sub
+
+F.Intrinsic.Control.Try
+
+	V.Local.iUserID.Declare(Long)
+	V.Local.sSender.Declare(String)
+	V.Local.sSenderEmail.Declare(String)
+	V.Local.sSenderName.Declare(String)
+	V.Local.sSubject.Declare(String)
+	V.Local.sBody.Declare(String)
+	V.Local.sUsers.Declare(String)
+	V.Local.sSQL.Declare(String)
+	V.Local.sReturn.Declare(String)
+	V.Local.iCounter.Declare(Long)
+	V.Local.sTemp.Declare(String)
+	V.Local.sFinalRecipients.Declare(String)
+	V.Local.sVendorName.Declare(String)
+	
+	'Get User ID
+	F.Global.Security.GetUserID(V.Caller.User, V.Caller.CompanyCode, V.Local.iUserID)
+	
+	'Set Subject
+	F.Intrinsic.String.Build("HOT item received: Part number {0}", V.Args.Part, V.Local.sSubject)
+	
+	'''Building sender parameter
+	'Get email address of GS User
+	F.Global.Security.GetUserEmail(V.Caller.User, V.Local.sSenderEmail)
+	
+	'Alert and end script if no email found for GS User
+	F.Intrinsic.control.If(V.Local.sSenderEmail,=,"")
+		F.Intrinsic.UI.Msgbox("Error in email procedure.  The GS User does not have an email address associated with it in User Security Maintenance.")
+		F.Intrinsic.Control.CallSub("FormEmail_UnLoad")
+	F.Intrinsic.Control.EndIf
+	
+	'Get full name of GS User
+	F.Global.Security.GetFullName(V.Caller.User, V.Caller.CompanyCode, V.Local.sSenderName)
+	
+	'Set Sender Info for Queue Message
+	f.Intrinsic.String.Concat(V.Local.sSenderEmail,"*!*", V.Local.sSenderName, V.Local.sSender)
+	'''
+	
+	'''Building recipients parameter, The recipients are delimited with a @!@, while the recipient's name and recipient's email address are delimited with a *!*.
+	'Group should be the value in GS_GROUP column in USER_GROUPS table, PONOTIFY for the customer
+	Function.Global.Security.GetGroupMembers("PONOTIFY", V.Caller.CompanyCode, V.Local.sReturn)
+	F.Intrinsic.String.Split(V.Local.sReturn, "*!*", V.Local.sReturn)
+	
+	'Looping through array to prepare data for selecting it in DB
+	F.Intrinsic.Control.For(V.Local.iCounter, 0, V.Local.sReturn.UBound, 1)
+		
+		F.Intrinsic.Control.If(V.Local.iCounter, =, 0)
+		
+			F.Intrinsic.String.Build("'{0}', ", V.Local.sReturn(V.Local.iCounter), V.Local.sUsers)
+			
+		F.Intrinsic.Control.ElseIf(V.Local.iCounter, <>, V.Local.sReturn.UBound)
+			
+			F.Intrinsic.String.Build("{0}'{1}', ", V.Local.sUsers, V.Local.sReturn(V.Local.iCounter), V.Local.sUsers)	
+	
+		F.Intrinsic.Control.Else
+			
+			F.Intrinsic.String.Build("{0}'{1}'", V.Local.sUsers, V.Local.sReturn(V.Local.iCounter), V.Local.sUsers)
+			
+		F.Intrinsic.Control.EndIf
+		
+	F.Intrinsic.Control.Next(V.Local.iCounter)
+	
+	'To check if datatables already exists
+	F.Intrinsic.Control.If(V.DataTable.dtRecipients.Exists)
+		F.Data.DataTable.Close("dtRecipients")
+	F.Intrinsic.Control.EndIf
+	
+	'Creating dt for all users that will receive the email
+	F.Intrinsic.String.Build("select RTRIM(GS_USER) GS_USER, RTRIM(FIRST_NAME) FIRST_NAME, RTRIM(LAST_NAME) LAST_NAME, RTRIM(EMAIL) EMAIL from GLOBALCOMMON.USER_INFORMATION where GS_USER in ({0});", V.Local.sUsers, V.Local.sSQL)
+	F.Data.DataTable.CreateFromSQL("dtRecipients", "Con", V.Local.sSQL, True)
+	
+	'Looping through dt to build the recipients parameter as stated in QueueMessage command
+	v.Local.iCounter.Set(0)
+	F.Intrinsic.Control.For(V.Local.iCounter, 0, V.DataTable.dtRecipients.RowCount--, 1)
+					
+		F.Intrinsic.String.Build("{0} {1}*!*{2}", V.DataTable.dtRecipients(V.Local.iCounter).FIRST_NAME!FieldValTrim, V.DataTable.dtRecipients(V.Local.iCounter).LAST_NAME!FieldValTrim, V.DataTable.dtRecipients(V.Local.iCounter).EMAIL!FieldValTrim, V.Local.sTemp)
+		V.Local.sFinalRecipients.Append(V.Local.sTemp)
+	
+		f.Intrinsic.Control.If(V.Local.iCounter, <>, V.DataTable.dtRecipients.RowCount--)
+			V.Local.sFinalRecipients.Append("@!@")
+		f.Intrinsic.Control.EndIf
+		
+	F.Intrinsic.Control.Next(V.Local.iCounter)
+	'''
+	
+	'''Setting email's body
+	V.Local.sBody.Set("The following HOT item has been received:")
+	f.Intrinsic.String.Build("{0}{1}", v.Local.sBody, v.Ambient.NewLine, v.Local.sBody)
+	f.Intrinsic.String.Build("{0}{1}  - Purchase Order: '{2}'", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).PURCHASE_ORDER!FieldValTrim, v.Local.sBody)
+	f.Intrinsic.String.Build("{0}{1}  - Line: '{2}'", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).RECORD_NO!FieldValTrim, v.Local.sBody)
+	f.Intrinsic.String.Build("{0}{1}  - Part Number: '{2}'", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).PART!FieldValTrim, v.Local.sBody)
+
+	''Getting vendor name
+	F.Intrinsic.String.Build("select RTRIM(NAME_VENDOR) NAME_VENDOR from V_VENDOR_MASTER where VENDOR = '{0}';", V.DataTable.dtPO(V.Args.MainCounter).VENDOR!FieldValTrim, V.Local.sSQL)
+	F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sVendorName)
+	f.Intrinsic.String.Build("{0}{1}  - Vendor: '{2}'", v.Local.sBody, v.Ambient.NewLine, V.Local.sVendorName, v.Local.sBody)
+	''
+	
+	f.Intrinsic.String.Build("{0}{1}  - Manufacturer's Name: '{2}'", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).MFG_NAME!FieldValTrim, v.Local.sBody)
+	f.Intrinsic.String.Build("{0}{1}  - Manufacturer's Part: '{2}'", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).PART_MFG_NO!FieldValTrim, v.Local.sBody)
+	
+	'If statements to identify if the PO line qty was received to inspection or to inventory
+	f.Intrinsic.Control.If(V.DataTable.dtFlags(V.DataTable.dtFlags.RowCount--).QTY_RECEIVED!FieldValTrim, =, 0)
+		
+		f.Intrinsic.Control.If(V.DataTable.dtFlags(V.DataTable.dtFlags.RowCount--).FLAG_INSP!FieldValTrim, =, "I")
+			
+			'Getting data for line received to inspection
+			f.Intrinsic.String.Build("{0}{1}  - Action: 'Received to Inspection'", v.Local.sBody, v.Ambient.NewLine, v.Local.sBody)
+			f.Intrinsic.String.Build("{0}{1}  - Quantity Ordered: {2}", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).QTY_ORDER!FieldValTrim, v.Local.sBody)
+			f.Intrinsic.String.Build("{0}{1}  - Quantity Received: {2}", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtFlags(V.DataTable.dtFlags.RowCount--).QTY_RECD_NOT_INSP!FieldValTrim, v.Local.sBody)
+		
+		f.Intrinsic.Control.EndIf
+	
+	f.Intrinsic.Control.Else
+		
+		'Getting data for line received to inventory
+		f.Intrinsic.String.Build("{0}{1}  - Action: 'Received to Inventory'", v.Local.sBody, v.Ambient.NewLine, v.Local.sBody)
+		f.Intrinsic.String.Build("{0}{1}  - Quantity Ordered: {2}", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).QTY_ORDER!FieldValTrim, v.Local.sBody)
+		f.Intrinsic.String.Build("{0}{1}  - Quantity Received: {2}", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtFlags(V.DataTable.dtFlags.RowCount--).QTY_RECEIVED!FieldValTrim, v.Local.sBody)
+		
+	f.Intrinsic.Control.EndIf
+	
+	f.Intrinsic.String.Build("{0}{1}  - Due Date: {2}", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).DUE_DATE_L!FieldValTrim, v.Local.sBody)
+	f.Intrinsic.String.Build("{0}{1}  - Original Due Date: {2}", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtPO(V.Args.MainCounter).ORIG_DUE_DATE!FieldValTrim, v.Local.sBody)
+	
+	f.Intrinsic.Control.If(V.DataTable.dtFlags(V.DataTable.dtFlags.RowCount--).WO!FieldValTrim, <>, "")
+		f.Intrinsic.String.Build("{0}{1}  - Work Order: '{2}'", v.Local.sBody, v.Ambient.NewLine, V.DataTable.dtFlags(V.DataTable.dtFlags.RowCount--).WO!FieldValTrim, v.Local.sBody)
+	f.Intrinsic.Control.Else
+		f.Intrinsic.String.Build("{0}{1}  - Work Order: 'NA'", v.Local.sBody, v.Ambient.NewLine, v.Local.sBody)
+	f.Intrinsic.Control.EndIf
+	
+	f.Intrinsic.String.Build("{0}{1}", v.Local.sBody, v.Ambient.NewLine, v.Local.sBody)
+	f.Intrinsic.String.Build("{0}{1}{2}", v.Local.sBody, v.Ambient.NewLine,"*Automatically generated email notification*", v.Local.sBody)
+	'''
+	
+	'Creating message, which be sent later by courier
+	F.Global.Messaging.QueueMessage(V.Caller.CompanyCode,V.Local.iUserID,"GCG_6514",V.Local.sSubject,V.Local.sSender, V.Local.sFinalRecipients, V.Local.sBody,5,"",False,"","","","","","","", "", "", "")
+	F.Intrinsic.UI.Sleep(1)
+	'F.Global.Messaging.QueueMessage(V.Caller.CompanyCode,V.Local.iUserID,"GCG_6514",V.Local.sSubject,V.Local.sSender, V.Local.sFinalRecipients, V.Local.sBody)
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.SendEmail.End
+Program.Sub.CallBDF.Start
+
+F.Intrinsic.Control.Try
+
+	V.Local.iRowCount.Declare(Long)
+	V.Local.iCounter.Declare(Long)
+	V.Local.sTemp.Declare(String)
+	V.Local.sLine.Declare(String)
+	
+	'Create dt
+	F.Data.DataTable.Create("dtPOLine", True)
+	F.Data.DataTable.AddColumn("dtPOLine", "LINE", "String")
+	
+	'Loading BDF
+	F.Intrinsic.BDF.Load("GAB-BDF", "AUX001")
+	F.Intrinsic.BDF.ReadRowCount("GAB-BDF", V.Local.iRowCount)
+	'Subtracting 1 to V.Local.iRowCount since For-loop considers 0 index
+	F.Intrinsic.Math.Sub(V.Local.iRowCount, 1, V.Local.iRowCount)
+	
+	F.Intrinsic.Control.For(V.Local.iCounter, 0, V.Local.iRowCount, 1)
+	
+		F.Intrinsic.BDF.ReadRow("GAB-BDF", V.Local.iCounter, V.Local.sTemp)
+		F.Intrinsic.String.Split(V.Local.sTemp, "|~|", V.Local.sTemp)
+		
+		F.Intrinsic.Control.If(V.Local.sTemp(13), <>, 0, "OR", V.Local.sTemp(14), <>, 0)
+			
+			F.Intrinsic.String.LPad(V.Local.sTemp(0),"0",3,V.Local.sLine)
+			f.Intrinsic.String.Build("{0}0", V.Local.sLine, V.Local.sLine)
+			F.Data.DataTable.AddRow("dtPOLine", "LINE", V.Local.sLine)
+			
+		F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.Control.Next(V.Local.iCounter)
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.CallBDF.End
+Program.Sub.CatchError.Start
+F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}", V.Ambient.ScriptPath, V.Ambient.Newline, V.Ambient.SubroutineCalledFrom, V.Ambient.ErrorNumber, V.Ambient.ErrorDescription, V.Ambient.GABVersion, V.Global.sError) 
+F.Intrinsic.UI.Msgbox(V.Global.sError)
+F.Intrinsic.Control.End()
+Program.Sub.CatchError.End
+
+Program.Sub.Comments.Start
+${$5$}$3.0.0.0$}$1
+${$6$}$apadilla$}$20211025115825221$}$Lag9STqBJOmNXSbd5+msRcBWPGz0aFqSwHruISZ+s7wsarqO5Dz6WdsbIcLLL4Q4FtN32WMHDMgeDIVJl0Dubw==
+Program.Sub.Comments.End
